@@ -1,25 +1,25 @@
-# Keen IO golang client SDK [![godoc reference](http://godoc.org/gopkg.in/inconshreveable/go-keen.v0?status.png)](http://godoc.org/gopkg.in/inconshreveable/go-keen.v0)
+# Keen IO Golang Client SDK
 
 ### Community-Supported SDK
-This is an _unofficial_ community supported SDK. If you find any issues or have a request please post an [issue](https://github.com/inconshreveable/go-keen/issues).
+This is an _unofficial_ community supported SDK. If you find any issues or have a request please post an [issue](https://github.com/Secoura/go-keen/issues).
 
 ## API Stability
 
 The master branch has no API stability guarantees. You can import the latest stable API with:
 ```go
-import "gopkg.in/inconshreveable/go-keen.v0"
+import "github.com/secoura/go-keen"
 ````
 
 ## Writing Events
 
-This is the very beginnings of a Keen IO client SDK in Go. Currently, only adding events to collections is supported.
+Currently, only adding events to collections is supported.
 
 The simplest API is to create a client object and then call AddEvent:
 ```go
 package main
 
 import (
-        "github.com/inconshreveable/go-keen"
+        "github.com/secoura/go-keen"
 )
 
 type ExampleEvent struct {
@@ -78,7 +78,6 @@ func main() {
 
 ## TODO
 Add support for all other Keen IO API endpoints, especially querying data.
-
 
 ## LICENSE
 MIT
