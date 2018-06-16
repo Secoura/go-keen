@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -13,51 +13,129 @@ const (
 	baseUrl = "https://api.keen.io/3.0/projects/"
 )
 
-type KeenProperties struct {
-	Timestamp string `json:"timestamp"`
+type batchMessages struct {
+	objectType string
+	messages   map[string][]interface{}
 }
 
-// Timestamp formats a time.Time object in the ISO-8601 format keen expects
-func Timestamp(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+func (b *batchMessages) AddEvent(collection string, properties interface{}) {
+	list, ok := b.messages[collection]
+	if !ok {
+		list = make([]interface{}, 0)
+	}
+	b.messages[collection] = append(list, properties)
+}
+
+type message struct {
+	objectType     string
+	collectionName string
+	properties     interface{}
 }
 
 type Client struct {
-	WriteKey   string
-	ProjectID  string
+	Interval   time.Duration
+	Size       int
 	HttpClient http.Client
+
+	writeKey  string
+	projectID string
+	msgs      chan message
+	quit      chan struct{}
+	shutdown  chan struct{}
+	mu        sync.Mutex
+	once      sync.Once
+	wg        sync.WaitGroup
 }
 
-func (c *Client) AddEvent(collection string, event interface{}) error {
-	resp, err := c.request("POST", fmt.Sprintf("/events/%s", collection), event)
-	if err != nil {
-		return err
-	}
+func New(projectID string, writeKey string) *Client {
+	return &Client{
+		Interval: 5 * time.Second,
+		Size:     250,
 
-	return c.respToError(resp)
+		projectID: projectID,
+		writeKey:  writeKey,
+		msgs:      make(chan message, 100),
+		quit:      make(chan struct{}),
+		shutdown:  make(chan struct{}),
+	}
 }
 
-func (c *Client) AddEvents(events map[string][]interface{}) error {
-	resp, err := c.request("POST", "/events", events)
-	if err != nil {
-		return err
-	}
-
-	return c.respToError(resp)
+func (c *Client) Event(collection string, event interface{}) {
+	c.queue(message{objectType: "events", collectionName: collection, properties: event})
 }
 
-func (c *Client) respToError(resp *http.Response) error {
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
+func (c *Client) startLoop() {
+	go c.loop()
+}
+
+func (c *Client) loop() {
+	var msgs []message
+	tick := time.NewTicker(c.Interval)
+
+	for {
+		select {
+		case msg := <-c.msgs:
+			msgs = append(msgs, msg)
+			if len(msgs) == c.Size {
+				c.sendAsync(msgs)
+				msgs = make([]message, 0, c.Size)
+			}
+		case <-tick.C:
+			if len(msgs) > 0 {
+				c.sendAsync(msgs)
+				msgs = make([]message, 0, c.Size)
+			}
+		case <-c.quit:
+			tick.Stop()
+			// drain msg channel
+			for msg := range c.msgs {
+				msgs = append(msgs, msg)
+			}
+			c.sendAsync(msgs)
+			c.wg.Wait()
+			c.shutdown <- struct{}{}
+			return
+		}
+	}
+}
+
+func (c *Client) queue(msg message) {
+	c.once.Do(c.startLoop)
+	c.msgs <- msg
+}
+
+func (c *Client) sendAsync(msgs []message) {
+	c.mu.Lock()
+	c.wg.Add(1)
+
+	go func() {
+		defer c.wg.Done()
+		defer c.mu.Unlock()
+		c.send(msgs)
+	}()
+}
+
+func (c *Client) send(msgs []message) error {
+	// Sort messages into groups
+	msgMap := make(map[string]batchMessages, 0)
+	for _, m := range msgs {
+		object := m.objectType
+		batch, ok := msgMap[object]
+		if !ok {
+			batch = batchMessages{objectType: object, messages: make(map[string][]interface{})}
+			msgMap[object] = batch
+		}
+		batch.AddEvent(m.collectionName, m.properties)
 	}
 
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
+	// Send each group
+	for object, batch := range msgMap {
+		for collection, properties := range batch.messages {
+			c.request("POST", fmt.Sprintf("/%s", object), map[string]interface{}{collection: properties})
+		}
 	}
 
-	return fmt.Errorf("Non 200 reply from keen.io: %s", data)
+	return nil
 }
 
 func (c *Client) request(method, path string, payload interface{}) (*http.Response, error) {
@@ -68,7 +146,7 @@ func (c *Client) request(method, path string, payload interface{}) (*http.Respon
 	}
 
 	// construct url
-	url := baseUrl + c.ProjectID + path
+	url := baseUrl + c.projectID + path
 
 	// new request
 	req, err := http.NewRequest(method, url, bytes.NewReader(body))
@@ -77,7 +155,7 @@ func (c *Client) request(method, path string, payload interface{}) (*http.Respon
 	}
 
 	// add auth
-	req.Header.Add("Authorization", c.WriteKey)
+	req.Header.Add("Authorization", c.writeKey)
 
 	// set length/content-type
 	if body != nil {
